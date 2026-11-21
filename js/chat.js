@@ -5,6 +5,7 @@ let selectedFile = null;
 let mediaRecorder = null;
 let audioChunks = [];
 let currentFilter = "all";
+let allUsers = [];
 
 function toast(message) {
   document.getElementById("toastText").textContent = message;
@@ -19,7 +20,12 @@ async function loadConversations() {
     .eq("user_id", currentUser.id);
   if (error) { toast(error.message); return; }
   const ids = (data || []).map(x => x.conversation_id);
-  if (!ids.length) { conversations = []; renderConversationList(); return; }
+  if (!ids.length) {
+    conversations = [];
+    renderConversationList();
+    await loadUsers();
+    return;
+  }
   const { data: members, error: mErr } = await db.from("conversation_members")
     .select("conversation_id,user_id,profiles(display_name)")
     .in("conversation_id", ids);
@@ -28,6 +34,45 @@ async function loadConversations() {
   (members || []).forEach(m => counts[m.conversation_id] = (counts[m.conversation_id] || 0) + 1);
   conversations = data.map(x => ({...x.conversations, role:x.role, count:counts[x.conversation_id] || 1}));
   renderConversationList();
+  await loadUsers();
+}
+async function loadUsers() {
+  const { data, error } = await db.from("profiles")
+    .select("id,email,display_name")
+    .neq("id", currentUser.id)
+    .order("display_name", { ascending: true });
+  const list = document.getElementById("userList");
+  if (error) {
+    list.innerHTML = '<div class="empty-hint py-3">تعذر تحميل المستخدمين</div>';
+    console.error(error);
+    return;
+  }
+  allUsers = data || [];
+  renderUsers();
+}
+function renderUsers() {
+  const list = document.getElementById("userList");
+  const q = (document.getElementById("searchInput").value || "").trim().toLowerCase();
+  const users = allUsers.filter(u =>
+    (u.display_name || "").toLowerCase().includes(q) ||
+    (u.email || "").toLowerCase().includes(q)
+  );
+  list.innerHTML = "";
+  if (!users.length) {
+    list.innerHTML = '<div class="empty-hint py-3">لا يوجد مستخدمون آخرون حالياً.</div>';
+    return;
+  }
+  users.forEach(u => {
+    const btn = document.createElement("button");
+    btn.className = "conversation-item";
+    const name = u.display_name || u.email.split("@")[0];
+    btn.innerHTML = `<div class="avatar">${escapeHtml(name.slice(0,1))}</div><div class="meta"><strong>${escapeHtml(name)}</strong><small>${escapeHtml(u.email)}</small></div><i class="bi bi-chat-dots text-primary"></i>`;
+    btn.addEventListener("click", async () => {
+      try { await createDirectConversationById(u.id); }
+      catch (err) { toast(err.message || "تعذر فتح المحادثة"); }
+    });
+    list.appendChild(btn);
+  });
 }
 function renderConversationList() {
   const list = document.getElementById("conversationList");
@@ -107,11 +152,15 @@ async function sendMessage(body, file = null) {
   }
 }
 async function createDirectConversation(email) {
-  const { data: target, error: userError } = await db.from("profiles").select("id,display_name").eq("email", email.toLowerCase()).maybeSingle();
+  const { data: target, error: userError } = await db.from("profiles")
+    .select("id").eq("email", email.toLowerCase()).maybeSingle();
   if (userError) throw userError;
   if (!target) throw new Error("لم يتم العثور على مستخدم بهذا البريد الإلكتروني");
-  if (target.id === currentUser.id) throw new Error("لا يمكنك بدء محادثة مع نفسك");
-  const { data: existing, error: eErr } = await db.rpc("find_direct_conversation", { other_user: target.id });
+  await createDirectConversationById(target.id);
+}
+async function createDirectConversationById(targetId) {
+  if (targetId === currentUser.id) throw new Error("لا يمكنك بدء محادثة مع نفسك");
+  const { data: existing, error: eErr } = await db.rpc("find_direct_conversation", { other_user: targetId });
   if (eErr) throw eErr;
   let convId = existing;
   if (!convId) {
@@ -119,7 +168,7 @@ async function createDirectConversation(email) {
     if (error) throw error;
     const { error: mErr } = await db.from("conversation_members").insert([
       {conversation_id:conv.id,user_id:currentUser.id,role:"member"},
-      {conversation_id:conv.id,user_id:target.id,role:"member"}
+      {conversation_id:conv.id,user_id:targetId,role:"member"}
     ]);
     if (mErr) throw mErr;
     convId = conv.id;
@@ -222,7 +271,7 @@ document.getElementById("membersBtn").addEventListener("click",showMembers);
 document.getElementById("chatSearchBtn").addEventListener("click",()=>document.getElementById("searchBar").classList.toggle("d-none"));
 document.getElementById("closeSearch").addEventListener("click",()=>document.getElementById("searchBar").classList.add("d-none"));
 document.getElementById("runSearch").addEventListener("click",()=>searchMessages(document.getElementById("messageSearch").value));
-document.getElementById("searchInput").addEventListener("input",renderConversationList);
+document.getElementById("searchInput").addEventListener("input",()=>{renderConversationList();renderUsers();});
 document.getElementById("allTab").addEventListener("click",()=>setFilter("all"));
 document.getElementById("directTab").addEventListener("click",()=>setFilter("direct"));
 document.getElementById("groupsTab").addEventListener("click",()=>setFilter("group"));
